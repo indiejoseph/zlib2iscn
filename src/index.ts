@@ -10,6 +10,8 @@ import {
   isCancel,
   cancel,
 } from '@clack/prompts';
+import fs from 'node:fs/promises';
+import os from 'node:os';
 import { Book, getBookIpfsHashes, getBooksFromReadlist } from './lib/zlib.js';
 import { createNFTSigningClient, estimateISCNFee, getAccountBalance } from './lib/iscn.js';
 import BigNumber from 'bignumber.js';
@@ -24,6 +26,11 @@ const ISCN_RECORD_NOTES = `zlib-iscn-uploader ${packageJson.version}`;
 const s = spinner();
 
 async function main() {
+  const tmpDir = os.tmpdir();
+  const formattedDate = new Date().toISOString().split('T')[0].replace(/:/g, '-');
+  const tmpLogPath = `${tmpDir}/zlib-iscn-uploader-${formattedDate}.log`;
+  const logStream = await fs.open(tmpLogPath, 'a');
+
   console.clear();
 
   const zlibUrl = await text({
@@ -50,8 +57,6 @@ async function main() {
   try {
     books = await getBooksFromReadlist(zlibUrl.toString());
     bookIpfsHashes = await getBookIpfsHashes(books, s);
-
-    console.log(bookIpfsHashes);
 
     s.stop('Fetched books from zLib, total: ' + books.length);
   } catch (error) {
@@ -84,7 +89,8 @@ async function main() {
   }));
   const convertedData = booksWithIpfsHashes.map(
     ({ book: { title, description, author, id, hash, ipfs } }) => {
-      const contentFingerprints = [`https://z-library.se/book/${id}/${hash}`, `ipfs://${ipfs}`];
+      const zlibUrl = `https://z-library.se/book/${id}/${hash}`;
+      const contentFingerprints = [`ipfs://${ipfs}`];
       const stakeholders = [
         {
           entity: {
@@ -99,11 +105,13 @@ async function main() {
       return {
         type: 'Book',
         name: title,
+        url: zlibUrl,
         contentFingerprints,
         stakeholders,
         description,
         author,
         recordNotes: ISCN_RECORD_NOTES,
+        sameAs: [`ipfs://${ipfs}`],
       } as ISCNSignPayload;
     }
   );
@@ -151,7 +159,6 @@ async function main() {
 
   try {
     const client = await createNFTSigningClient(iscnUploadGroup.rpcUrl, iscnUploadGroup.mnemonic);
-
     const iscnFee = await estimateISCNFee(convertedData, GAS_PRICE, client);
     const denom = iscnUploadGroup.rpcUrl.includes('testnet') ? TESTNET_COSMOS_DENOM : COSMOS_DENOM;
     const { amount } = await getAccountBalance(denom, client);
@@ -186,6 +193,15 @@ async function main() {
         memo: ISCN_RECORD_NOTES,
       });
 
+      // write to log
+      await logStream.write(
+        `${JSON.stringify({
+          ...payload,
+          txHash: (tx as any).transactionHash,
+          date: new Date().toISOString(),
+        })}\n`
+      );
+
       note(
         `ISCN ${i + 1}/${convertedData.length} created, tx hash: ${(tx as any).transactionHash}`,
         'Created ISCN'
@@ -196,7 +212,12 @@ async function main() {
 
     s.stop('Created ISCN');
 
-    outro('Bye!');
+    // stop log stream
+    await logStream.close();
+
+    outro(
+      `Your ISCNs have been created, please check the log file for transaction details. (${tmpLogPath})`
+    );
   } catch (error) {
     console.error(error);
     s.stop('Failed to upload books to ISCN');
